@@ -12,10 +12,10 @@ aqui. nome é informado explicitamente só quando queremos um valor
 específico; nos outros casos, deixamos o próprio modelo gerar.
 """
 
+from .concreto import Concreto, TipoAgregado
 from .elementos import ApoioRestricao
 from .estrutura import ModeloPortico
 from .geometria import Ponto
-from .materiais import Material
 from .secoes import SecaoRetangular
 from .vinculos import Restricao
 
@@ -41,9 +41,7 @@ def exemplo_portico_simples() -> ModeloPortico:
     # 2) Seção e material -- reaproveitados pelos dois pilares e pela viga
     sec_pilar = SecaoRetangular(largura=0.3, altura=0.5)
     sec_viga = SecaoRetangular(largura=0.2, altura=0.5)
-    concreto = Material(
-        nome="C30", modulo_elasticidade=26_000_000, coeficiente_poisson=0.2, peso_especifico=25.0
-    )
+    concreto = Concreto(fck_MPa=30.0, agregado=TipoAgregado.BASALTO_DIABASIO, nome="C30")
 
     # 3) Pilares P1 (0,0) e P2 (5,0), os dois do Terreo ao Pav1 -- id e nome
     #    ("P1", "P2") gerados automaticamente pelo modelo
@@ -91,9 +89,7 @@ def exemplo_viga_isolada_com_4_apoios() -> ModeloPortico:
     pav = modelo.criar_pavimento(nome="Ficticio", elevacao=0.0)
 
     sec = SecaoRetangular(largura=0.2, altura=0.5)
-    concreto = Material(
-        nome="C30", modulo_elasticidade=26_000_000, coeficiente_poisson=0.2, peso_especifico=25.0
-    )
+    concreto = Concreto(fck_MPa=30.0, agregado=TipoAgregado.BASALTO_DIABASIO, nome="C30")
 
     viga = modelo.criar_viga(
         ponto_inicial=Ponto(0.0, 0.0, 0.0),
@@ -135,9 +131,7 @@ def exemplo_portico_com_laje() -> ModeloPortico:
     sec_pilar = SecaoRetangular(largura=0.3, altura=0.3)
     sec_viga = SecaoRetangular(largura=0.2, altura=0.4)
     sec_laje = SecaoRetangular(largura=1.0, altura=0.12)  # "largura" não se aplica à laje; altura = espessura (12 cm)
-    concreto = Material(
-        nome="C30", modulo_elasticidade=26_000_000, coeficiente_poisson=0.2, peso_especifico=25.0
-    )
+    concreto = Concreto(fck_MPa=30.0, agregado=TipoAgregado.BASALTO_DIABASIO, nome="C30")
 
     # 4 pilares nos cantos de um retângulo de 6,0 x 4,0 m
     cantos = [(0.0, 0.0), (6.0, 0.0), (6.0, 4.0), (0.0, 4.0)]
