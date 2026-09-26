@@ -40,7 +40,7 @@ from .interseccao import (
     detectar_intersecoes_viga_viga_por_pavimento,
 )
 from .materiais import Material
-from .secoes import SecaoTransversal
+from .secoes import SecaoRetangular, SecaoTransversal
 from .vinculos import Restricao
 
 
@@ -454,6 +454,25 @@ class ModeloPortico:
         (Viga/Bordo) num polígono, gera o grid, e traduz as barras
         cruas da Grelha para Barra do modelo.
 
+        Seção das barras de grid: NÃO é `laje.secao` (essa descreve a
+        laje inteira -- "largura" nela não tem sentido físico, só
+        `altura`/espessura é usada, ver secoes.py e exportadores/).
+        Cada barra do grid representa uma faixa de largura tributária
+        da própria laje (analogia de grelha), então sua seção é um
+        retângulo com altura = espessura da laje e largura = o
+        espaçamento do grid NA DIREÇÃO PERPENDICULAR à barra -- ou
+        seja, a largura tributária de uma barra é a distância até a
+        próxima barra PARALELA a ela, não o espaçamento na própria
+        direção em que ela corre. Concretamente (ver Grelha.gerar_grelha):
+        barras_grid_x correm ao longo do eixo local e1 mas são
+        espaçadas ENTRE SI por `espacamento_y`; barras_grid_y correm
+        ao longo de e2 e são espaçadas por `espacamento_x`. Se
+        espacamento_x != espacamento_y, as duas direções usam seções
+        diferentes (decisão confirmada com o usuário).
+
+        Só suporta `laje.secao` como SecaoRetangular (mesma limitação
+        já existente na extrusão de sólido da laje inteira).
+
         PENDÊNCIA DE PROJETO: validação de Viga cruzando o INTERIOR da
         Laje (deveria gerar erro) ainda não implementada.
         """
@@ -463,12 +482,22 @@ class ModeloPortico:
             grelha.gerar_grelha(laje.espacamento_x, laje.espacamento_y)
             laje.grelha = grelha
 
+            if not isinstance(laje.secao, SecaoRetangular):
+                raise NotImplementedError(
+                    f"Seção das barras de grid só implementada pra Laje com secao "
+                    f"SecaoRetangular (Laje '{laje.nome}' usa {type(laje.secao).__name__})."
+                )
+            espessura = laje.secao.altura
+            # largura CRUZADA com a direção da própria barra -- ver docstring acima
+            secao_grid_x = SecaoRetangular(largura=laje.espacamento_y, altura=espessura)
+            secao_grid_y = SecaoRetangular(largura=laje.espacamento_x, altura=espessura)
+
             laje.barras_grid_x = [
                 Barra(
                     id=self.gerador_id.proximo_id(),
                     no_inicial=Ponto(*p1),
                     no_final=Ponto(*p2),
-                    secao=laje.secao,
+                    secao=secao_grid_x,
                     material=laje.material,
                 )
                 for p1, p2 in grelha.barras_x()
@@ -478,7 +507,7 @@ class ModeloPortico:
                     id=self.gerador_id.proximo_id(),
                     no_inicial=Ponto(*p1),
                     no_final=Ponto(*p2),
-                    secao=laje.secao,
+                    secao=secao_grid_y,
                     material=laje.material,
                 )
                 for p1, p2 in grelha.barras_y()
