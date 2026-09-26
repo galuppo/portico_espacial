@@ -174,7 +174,7 @@ class ExportadorDxf:
             for vao in viga.vaos:
                 pavimento_vao = self._pavimento_do_vao(vao, viga, modelo.pavimentos)
                 if pavimento is None or pavimento_vao == pavimento:
-                    desenhar_barra(msp, vao, pavimento_vao, "VIGAS", self._COR_VIGAS)
+                    desenhar_barra(msp, vao, pavimento_vao, "VIGAS", self._COR_VIGAS, referencia_topo=True)
                     self._desenhar_apoio(msp, vao.apoio_inicial, pavimento_vao)
                     self._desenhar_apoio(msp, vao.apoio_final, pavimento_vao)
                     algo_desenhado = True
@@ -182,7 +182,7 @@ class ExportadorDxf:
         for laje in modelo.lajes:
             if pavimento is None or laje.pavimento == pavimento:
                 for barra in [*laje.barras_grid_x, *laje.barras_grid_y]:
-                    desenhar_barra(msp, barra, laje.pavimento, "LAJES", self._COR_LAJES)
+                    desenhar_barra(msp, barra, laje.pavimento, "LAJES", self._COR_LAJES, referencia_topo=True)
                 self._desenhar_rotulo_laje(msp, laje, laje.pavimento)
                 algo_desenhado = True
 
@@ -195,8 +195,17 @@ class ExportadorDxf:
     # Barras + rótulos
     # ------------------------------------------------------------------
 
-    def _desenhar_barra(self, msp, barra, pavimento: Pavimento, sufixo_layer: str, cor: int) -> None:
-        """Desenha uma Barra (Lance/Vão/Link/barra de grid) como LINE 3D + rótulo de id/nome."""
+    def _desenhar_barra(
+        self, msp, barra, pavimento: Pavimento, sufixo_layer: str, cor: int, referencia_topo: bool = False
+    ) -> None:
+        """
+        Desenha uma Barra (Lance/Vão/Link/barra de grid) como LINE 3D + rótulo de id/nome.
+
+        `referencia_topo` não se aplica ao modo linha (não há seção pra
+        deslocar) -- existe só pra manter a mesma assinatura de
+        `_desenhar_solido`, já que `desenhar_barra` é atribuída
+        dinamicamente a uma das duas funções em `_gerar()`.
+        """
         p1, p2 = barra.no_inicial, barra.no_final
         layer = self._layer(pavimento, sufixo_layer, cor)
         msp.add_line((p1.x, p1.y, p1.z), (p2.x, p2.y, p2.z), dxfattribs={"layer": layer})
@@ -207,15 +216,28 @@ class ExportadorDxf:
         texto = f"{nome} [{barra.id}]" if nome else f"[{barra.id}]"
         self._desenhar_rotulo(msp, texto, self._ponto_medio(p1, p2), pavimento)
 
-    def _desenhar_solido(self, msp, barra, pavimento: Pavimento, sufixo_layer: str, cor: int) -> None:
+    def _desenhar_solido(
+        self, msp, barra, pavimento: Pavimento, sufixo_layer: str, cor: int, referencia_topo: bool = False
+    ) -> None:
         """
         Desenha uma Barra como sólido extrudado (MESH fechada) pela sua
         seção real (`barra.secao.vertices`) + rótulo de id/nome, igual a
         `_desenhar_barra`. Ver orientação da seção na docstring do módulo.
+
+        `referencia_topo=True` (Viga, barra de grid de Laje): `no_inicial`/
+        `no_final` representam o TOPO da seção, não o eixo centroidal (ver
+        docstring de `interseccao.py`/`elementos.py`) -- desloca o perfil
+        pra baixo (no eixo local 2, "altura") até seu ponto mais alto
+        coincidir com a referência, em vez de ficar centrado nela.
+        `referencia_topo=False` (Pilar): perfil fica centrado no eixo, sem
+        deslocamento -- comportamento anterior, inalterado.
         """
         no_i, no_f = barra.no_inicial, barra.no_final
         _, eixo2, eixo3 = self._eixos_locais(no_i, no_f, barra.rotacao)
         vertices_secao = self._vertices_anti_horario(barra.secao.vertices)
+        if referencia_topo:
+            altura_maxima = max(vy for _vx, vy in vertices_secao)
+            vertices_secao = [(vx, vy - altura_maxima) for vx, vy in vertices_secao]
         n = len(vertices_secao)
 
         def ponto_3d(no: Ponto, vx: float, vy: float) -> Tuple[float, float, float]:

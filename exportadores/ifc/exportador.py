@@ -185,7 +185,7 @@ class ExportadorIfc:
 		return projeto
 
 	def _escrever_storey(self, pavimento: Pavimento) -> RefEntidadeIfc:
-		ponto = self._w.criar_entidade("IFCCARTESIANPOINT", Coordinates=[0.0, 0.0, pavimento.elevacao])
+		ponto = self._w.criar_entidade("IFCCARTESIANPOINT", Coordinates=[0.0, 0.0, float(pavimento.elevacao)])
 		eixo = self._w.criar_entidade("IFCAXIS2PLACEMENT3D", Location=ponto, Axis=None, RefDirection=None)
 		placement = self._w.criar_entidade("IFCLOCALPLACEMENT", PlacementRelTo=None, RelativePlacement=eixo)
 		storey = self._w.criar_entidade(
@@ -193,7 +193,7 @@ class ExportadorIfc:
 			GlobalId=guid_deterministico(NAMESPACE_PORTICO_ESPACIAL, f"storey:{pavimento.nome}"),
 			OwnerHistory=None, Name=pavimento.nome, Description=None,
 			ObjectType=None, ObjectPlacement=placement, Representation=None,
-			LongName=None, CompositionType=ValorEnum("ELEMENT"), Elevation=pavimento.elevacao,
+			LongName=None, CompositionType=ValorEnum("ELEMENT"), Elevation=float(pavimento.elevacao),
 		)
 		self._w.criar_entidade(
 			"IFCRELAGGREGATES",
@@ -232,7 +232,7 @@ class ExportadorIfc:
 		if isinstance(apoio, ApoioRestricao):
 			condicao = self._escrever_condicao_contorno(apoio.restricao)
 
-		ponto_ifc = self._w.criar_entidade("IFCCARTESIANPOINT", Coordinates=[ponto.x, ponto.y, ponto.z])
+		ponto_ifc = self._w.criar_entidade("IFCCARTESIANPOINT", Coordinates=[float(ponto.x), float(ponto.y), float(ponto.z)])
 		eixo = self._w.criar_entidade("IFCAXIS2PLACEMENT3D", Location=ponto_ifc, Axis=None, RefDirection=None)
 		placement = self._w.criar_entidade("IFCLOCALPLACEMENT", PlacementRelTo=None, RelativePlacement=eixo)
 
@@ -336,7 +336,7 @@ class ExportadorIfc:
 			raise ValueError("Barra de comprimento nulo -- não dá pra orientar geometricamente.")
 		e1 = (dx / comprimento, dy / comprimento, dz / comprimento)
 
-		quase_vertical = abs(e1[2]) > 0.999  # barra ~alinhada ao eixo Z global
+		quase_vertical = abs(e1[2]) > 1 - 1e-9  # mesma tolerância do ExportadorDxf._eixos_locais
 		ref = (1.0, 0.0, 0.0) if quase_vertical else (0.0, 0.0, 1.0)
 
 		produto_escalar = ref[0] * e1[0] + ref[1] * e1[1] + ref[2] * e1[2]
@@ -357,24 +357,46 @@ class ExportadorIfc:
 
 		return e1, e2, e3, comprimento
 
-	def _perfil_retangular_pontos(
-		self, altura: float, largura: float, referencia_topo: bool
-	) -> List[RefEntidadeIfc]:
+	def _vertices_anti_horario(self, vertices: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+		"""Garante sentido anti-horário (área com sinal positiva) -- mesmo critério do ExportadorDxf,
+		pra normal do perfil sair consistente independente da ordem em que os vértices foram informados."""
+		area_dupla = sum(
+			vertices[i][0] * vertices[(i + 1) % len(vertices)][1] - vertices[(i + 1) % len(vertices)][0] * vertices[i][1]
+			for i in range(len(vertices))
+		)
+		return vertices if area_dupla > 0 else list(reversed(vertices))
+
+	def _perfil_pontos(self, secao, referencia_topo: bool) -> List[RefEntidadeIfc]:
 		"""
-		4 IfcCartesianPoint (2D locais) do contorno retangular, na ordem do
-		laço fechado. `referencia_topo=True` (Viga): a origem do perfil é o
-		TOPO da seção, então o retângulo desce (x local de -altura a 0).
-		`referencia_topo=False` (Pilar): perfil centrado na origem (x local
-		de -altura/2 a +altura/2). Eixo local X = eixo2 (altura, eixo
-		forte); eixo local Y = eixo3 (largura).
+		Pontos (2D locais) do contorno do perfil, na ordem do laço fechado
+		-- usa `secao.vertices` genericamente (funciona com qualquer
+		SecaoTransversal: SecaoRetangular, SecaoPoligonal, etc.), sem
+		depender de uma implementação específica.
+
+		`secao.vertices` vem como (largura, altura) -- mesma convenção que
+		`ExportadorDxf` usa (vx=largura→eixo3, vy=altura→eixo2). Já o
+		ObjectPlacement daqui usa local-X=eixo2 (altura) e local-Y=eixo3
+		(largura) -- ordem invertida -- então as componentes são trocadas
+		na conversão pra não sair uma seção rotacionada 90° (largura no
+		lugar de altura) pra qualquer perfil não-quadrado.
+
+		`referencia_topo=True` (Viga): `no_inicial`/`no_final` representam
+		o TOPO da seção, não o eixo -- desloca o perfil (na componente que
+		representa a altura, já em local-X depois da troca) até seu ponto
+		mais alto coincidir com a referência, em vez de ficar centrado
+		nela. Generaliza pra qualquer perfil (não só retangular): desloca
+		pelo valor máximo real dos vértices, não por altura/2 fixo.
+		`referencia_topo=False` (Pilar): perfil fica como veio de
+		`secao.vertices` (já centrado na origem, por convenção de
+		SecaoTransversal), sem deslocamento.
 		"""
+		vertices_largura_altura = list(secao.vertices)
+		vertices = [(altura, largura) for largura, altura in vertices_largura_altura]  # -> (X=altura, Y=largura)
+		vertices = self._vertices_anti_horario(vertices)
 		if referencia_topo:
-			x_min, x_max = -altura, 0.0
-		else:
-			x_min, x_max = -altura / 2.0, altura / 2.0
-		y_min, y_max = -largura / 2.0, largura / 2.0
-		cantos = [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max)]
-		return [self._w.criar_entidade("IFCCARTESIANPOINT", Coordinates=list(c)) for c in cantos]
+			x_maximo = max(vx for vx, _vy in vertices)  # X agora é a componente de altura
+			vertices = [(vx - x_maximo, vy) for vx, vy in vertices]
+		return [self._w.criar_entidade("IFCCARTESIANPOINT", Coordinates=[float(v[0]), float(v[1])]) for v in vertices]
 
 	# ------------------------------------------------------------------
 	# elemento físico (compartilhado por Pilar/Viga)
@@ -387,29 +409,23 @@ class ExportadorIfc:
 	) -> RefEntidadeIfc:
 		"""
 		Cria o elemento físico com geometria de sólido real
-		(IfcExtrudedAreaSolid, seção retangular extrudada ao longo da
-		barra), ligado aos membros analíticos correspondentes
+		(IfcExtrudedAreaSolid, seção real extrudada ao longo da barra),
+		ligado aos membros analíticos correspondentes
 		(IfcRelAssignsToProduct), ao Pavimento (IfcRelContainedInSpatialStructure)
 		e ao Material (IfcRelAssociatesMaterial).
 
-		Só SecaoRetangular é suportada (única implementação existente de
-		SecaoTransversal hoje) -- levanta erro claro se algum dia aparecer
-		outra, em vez de silenciosamente gerar geometria errada.
+		Funciona com qualquer SecaoTransversal (usa `secao.vertices`
+		genericamente) -- não fica mais restrito a SecaoRetangular.
 		"""
 		secao = barras_grupo[0].secao
-		if not isinstance(secao, SecaoRetangular):
-			raise NotImplementedError(
-				f"Geometria de sólido só implementada pra SecaoRetangular (elemento '{nome}' "
-				f"usa {type(secao).__name__})."
-			)
 
 		p_ini = barras_grupo[0].no_inicial
 		p_fim = barras_grupo[-1].no_final
 		e1, e2, e3, comprimento = self._eixos_locais(p_ini, p_fim, barras_grupo[0].rotacao)
 
-		origem_ifc = self._w.criar_entidade("IFCCARTESIANPOINT", Coordinates=[p_ini.x, p_ini.y, p_ini.z])
-		eixo1_ifc = self._w.criar_entidade("IFCDIRECTION", DirectionRatios=list(e1))
-		eixo2_ifc = self._w.criar_entidade("IFCDIRECTION", DirectionRatios=list(e2))
+		origem_ifc = self._w.criar_entidade("IFCCARTESIANPOINT", Coordinates=[float(p_ini.x), float(p_ini.y), float(p_ini.z)])
+		eixo1_ifc = self._w.criar_entidade("IFCDIRECTION", DirectionRatios=[float(c) for c in e1])
+		eixo2_ifc = self._w.criar_entidade("IFCDIRECTION", DirectionRatios=[float(c) for c in e2])
 		orientacao = self._w.criar_entidade(
 			"IFCAXIS2PLACEMENT3D", Location=origem_ifc, Axis=eixo1_ifc, RefDirection=eixo2_ifc
 		)
@@ -417,9 +433,7 @@ class ExportadorIfc:
 
 		# perfil no plano local (eixo2=altura/eixo forte, eixo3=largura) --
 		# referência é o topo da seção só pra Viga (ver docstring do módulo)
-		pontos_perfil = self._perfil_retangular_pontos(
-			secao.altura, secao.largura, referencia_topo=(tipo_ifc == "IFCBEAM")
-		)
+		pontos_perfil = self._perfil_pontos(secao, referencia_topo=(tipo_ifc == "IFCBEAM"))
 		contorno = self._w.criar_entidade("IFCPOLYLINE", Points=pontos_perfil + [pontos_perfil[0]])
 		perfil = self._w.criar_entidade(
 			"IFCARBITRARYCLOSEDPROFILEDEF", ProfileType=ValorEnum("AREA"), ProfileName=None, OuterCurve=contorno
@@ -660,14 +674,14 @@ class ExportadorIfc:
 				"sólido de laje inclinada não implementada nesta versão."
 			)
 
-		origem_ifc = self._w.criar_entidade("IFCCARTESIANPOINT", Coordinates=[0.0, 0.0, z0])
+		origem_ifc = self._w.criar_entidade("IFCCARTESIANPOINT", Coordinates=[0.0, 0.0, float(z0)])
 		posicao_solido = self._w.criar_entidade(
 			"IFCAXIS2PLACEMENT3D", Location=origem_ifc, Axis=None, RefDirection=None
 		)
 		placement = self._w.criar_entidade("IFCLOCALPLACEMENT", PlacementRelTo=None, RelativePlacement=posicao_solido)
 
 		pontos_perfil = [
-			self._w.criar_entidade("IFCCARTESIANPOINT", Coordinates=[x, y]) for x, y, _z in poligono
+			self._w.criar_entidade("IFCCARTESIANPOINT", Coordinates=[float(x), float(y)]) for x, y, _z in poligono
 		]
 		contorno_ifc = self._w.criar_entidade("IFCPOLYLINE", Points=pontos_perfil + [pontos_perfil[0]])
 		perfil = self._w.criar_entidade(
@@ -680,7 +694,7 @@ class ExportadorIfc:
 		direcao_extrusao = self._w.criar_entidade("IFCDIRECTION", DirectionRatios=[0.0, 0.0, -1.0])
 		solido = self._w.criar_entidade(
 			"IFCEXTRUDEDAREASOLID", SweptArea=perfil, Position=self._eixo_origem(),
-			ExtrudedDirection=direcao_extrusao, Depth=laje.secao.altura,
+			ExtrudedDirection=direcao_extrusao, Depth=float(laje.secao.altura),
 		)
 		representacao = self._w.criar_entidade(
 			"IFCSHAPEREPRESENTATION", ContextOfItems=self._contexto_geometrico(),
