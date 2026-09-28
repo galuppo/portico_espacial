@@ -190,7 +190,7 @@ class ExportadorDxf:
                 algo_desenhado = True
 
         if not algo_desenhado:
-            raise ValueError(f"Nenhum elemento do modelo foi classificado no pavimento {pavimento.nome!r}.")
+            return
 
         self._doc.saveas(caminho)
 
