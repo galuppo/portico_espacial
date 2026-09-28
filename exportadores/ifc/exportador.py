@@ -316,8 +316,9 @@ class ExportadorIfc:
 		return grupos
 
 	# ------------------------------------------------------------------
-	# geometria 3D (orientação da barra + perfil retangular) -- convenção
-	# SAP2000, confirmada com o usuário (ver docstring do módulo)
+	# geometria 3D (orientação da barra + perfil) -- convenção PRÓPRIA do
+	# projeto (derivada da do SAP2000, com um ajuste só no caso vertical --
+	# ver _eixos_locais)
 	# ------------------------------------------------------------------
 
 	def _eixos_locais(
@@ -325,10 +326,26 @@ class ExportadorIfc:
 	) -> Tuple[Tuple[float, float, float], Tuple[float, float, float], Tuple[float, float, float], float]:
 		"""
 		Calcula (eixo1, eixo2, eixo3, comprimento) pra uma barra de p_ini a
-		p_fim, com a rotação própria aplicada. eixo1 = direção da barra;
-		eixo2 = "pra cima" (Z global projetado, ou X global se a barra for
-		quase vertical) rotacionado por `rotacao_graus` em torno de eixo1;
-		eixo3 = eixo1 × eixo2.
+		p_fim, com a rotação própria aplicada.
+
+		CONVENÇÃO PRÓPRIA DO PROJETO (mesma em ExportadorDxf._eixos_locais):
+		  eixo1 = ao longo da barra (p_ini -> p_fim)
+		  eixo2 = "pra cima" -- Z global projetado no plano perpendicular a
+		          eixo1; se a barra é vertical (Z não tem projeção, caso
+		          degenerado), usa Y global no lugar (o SAP2000 usa X aqui --
+		          ajuste deliberado, ver abaixo)
+		  eixo3 = eixo1 x eixo2
+		  `rotacao_graus` gira eixo2/eixo3 em torno de eixo1.
+		Regra ÚNICA pra qualquer orientação: altura da seção -> eixo2,
+		largura -> eixo3. Com Y como fallback, isso dá, pra pilar vertical,
+		altura em Y e largura em X (leitura de planta baixa), e mantém a
+		altura de Pilar e Viga consistentes entre si (nas duas, a altura
+		é a dimensão ao longo do eixo2).
+
+		ATENÇÃO na exportação pro SAP2000: essa convenção difere da dele
+		só pra barra vertical (SAP2000: eixo2 = X; aqui: eixo2 = Y) --
+		quem exportar pro SAP2000 precisa compensar (ex.: rotação de 90°
+		na barra vertical).
 		"""
 		dx, dy, dz = p_fim.x - p_ini.x, p_fim.y - p_ini.y, p_fim.z - p_ini.z
 		comprimento = math.sqrt(dx * dx + dy * dy + dz * dz)
@@ -336,8 +353,8 @@ class ExportadorIfc:
 			raise ValueError("Barra de comprimento nulo -- não dá pra orientar geometricamente.")
 		e1 = (dx / comprimento, dy / comprimento, dz / comprimento)
 
-		quase_vertical = abs(e1[2]) > 1 - 1e-9  # mesma tolerância do ExportadorDxf._eixos_locais
-		ref = (1.0, 0.0, 0.0) if quase_vertical else (0.0, 0.0, 1.0)
+		barra_vertical = abs(e1[2]) > 1 - 1e-9  # mesma tolerância do ExportadorDxf._eixos_locais
+		ref = (0.0, 1.0, 0.0) if barra_vertical else (0.0, 0.0, 1.0)
 
 		produto_escalar = ref[0] * e1[0] + ref[1] * e1[1] + ref[2] * e1[2]
 		bruto = tuple(ref[i] - produto_escalar * e1[i] for i in range(3))
@@ -370,31 +387,27 @@ class ExportadorIfc:
 		"""
 		Pontos (2D locais) do contorno do perfil, na ordem do laço fechado
 		-- usa `secao.vertices` genericamente (funciona com qualquer
-		SecaoTransversal: SecaoRetangular, SecaoPoligonal, etc.), sem
-		depender de uma implementação específica.
+		SecaoTransversal: SecaoRetangular, SecaoPoligonal, etc.).
 
-		`secao.vertices` vem como (largura, altura) -- mesma convenção que
-		`ExportadorDxf` usa (vx=largura→eixo3, vy=altura→eixo2). Já o
-		ObjectPlacement daqui usa local-X=eixo2 (altura) e local-Y=eixo3
-		(largura) -- ordem invertida -- então as componentes são trocadas
-		na conversão pra não sair uma seção rotacionada 90° (largura no
-		lugar de altura) pra qualquer perfil não-quadrado.
+		`secao.vertices` vem como (largura, altura). O ObjectPlacement
+		daqui usa local-X=eixo2 e local-Y=eixo3, e a regra é única pra
+		qualquer orientação (ver _eixos_locais): altura -> eixo2 (X
+		local), largura -> eixo3 (Y local) -- por isso as componentes são
+		trocadas na conversão: (largura, altura) -> (altura, largura).
 
 		`referencia_topo=True` (Viga): `no_inicial`/`no_final` representam
-		o TOPO da seção, não o eixo -- desloca o perfil (na componente que
-		representa a altura, já em local-X depois da troca) até seu ponto
-		mais alto coincidir com a referência, em vez de ficar centrado
-		nela. Generaliza pra qualquer perfil (não só retangular): desloca
-		pelo valor máximo real dos vértices, não por altura/2 fixo.
+		o TOPO da seção, não o eixo -- desloca o perfil (na componente de
+		altura, já em X local depois da troca) até seu ponto mais alto
+		coincidir com a referência, em vez de ficar centrado nela.
+		Generaliza pra qualquer perfil (não só retangular): desloca pelo
+		valor máximo real dos vértices, não por altura/2 fixo.
 		`referencia_topo=False` (Pilar): perfil fica como veio de
-		`secao.vertices` (já centrado na origem, por convenção de
-		SecaoTransversal), sem deslocamento.
+		`secao.vertices`, sem deslocamento.
 		"""
-		vertices_largura_altura = list(secao.vertices)
-		vertices = [(altura, largura) for largura, altura in vertices_largura_altura]  # -> (X=altura, Y=largura)
+		vertices = [(altura, largura) for largura, altura in secao.vertices]  # -> (X=altura, Y=largura)
 		vertices = self._vertices_anti_horario(vertices)
 		if referencia_topo:
-			x_maximo = max(vx for vx, _vy in vertices)  # X agora é a componente de altura
+			x_maximo = max(vx for vx, _vy in vertices)  # X é a componente de altura
 			vertices = [(vx - x_maximo, vy) for vx, vy in vertices]
 		return [self._w.criar_entidade("IFCCARTESIANPOINT", Coordinates=[float(v[0]), float(v[1])]) for v in vertices]
 
@@ -431,7 +444,7 @@ class ExportadorIfc:
 		)
 		placement = self._w.criar_entidade("IFCLOCALPLACEMENT", PlacementRelTo=None, RelativePlacement=orientacao)
 
-		# perfil no plano local (eixo2=altura/eixo forte, eixo3=largura) --
+		# perfil no plano local (altura -> eixo2, largura -> eixo3) --
 		# referência é o topo da seção só pra Viga (ver docstring do módulo)
 		pontos_perfil = self._perfil_pontos(secao, referencia_topo=(tipo_ifc == "IFCBEAM"))
 		contorno = self._w.criar_entidade("IFCPOLYLINE", Points=pontos_perfil + [pontos_perfil[0]])

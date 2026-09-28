@@ -22,16 +22,19 @@ ajustáveis se não corresponderem ao que você espera ver no CAD):
     desenham apoios/rótulos do mesmo jeito (sempre como linhas/texto,
     mesmo no modo sólido).
 
-  - Orientação da seção no espaço: como nenhuma outra parte do
-    projeto ainda interpreta `Barra.rotacao` geometricamente, segui a
-    convenção default de eixos locais do SAP2000 (mesma referência
-    que este projeto já usa pra tudo o mais) -- eixo local 1 ao longo
-    da barra (no_inicial -> no_final); eixo local 2 default = projeção
-    de +Z global perpendicular ao eixo 1 (mantém a seção "em pé"), ou
-    +X global se a barra for exatamente vertical; eixo local 3 =
-    eixo1 × eixo2; `rotacao` (graus) gira 2/3 em torno de 1. A altura
-    da seção (dimensão do eixo forte, `inercia_x`) fica alinhada ao
-    eixo local 2; a largura (`inercia_y`), ao eixo local 3.
+  - Orientação da seção no espaço: convenção PRÓPRIA do projeto
+    (derivada da do SAP2000, com um ajuste só no caso vertical; mesma
+    em ExportadorIfc._eixos_locais) -- eixo local 1 ao longo da barra
+    (no_inicial -> no_final); eixo local 2 default = projeção de +Z
+    global perpendicular ao eixo 1 (mantém a seção "em pé"), ou +Y
+    global se a barra for exatamente vertical (o SAP2000 usa +X aqui --
+    quem exportar pro SAP2000 precisa compensar); eixo local 3 =
+    eixo1 × eixo2; `rotacao` (graus) gira 2/3 em torno de 1. Regra
+    única pra qualquer orientação: a altura da seção (dimensão do eixo
+    forte, `inercia_x`) fica alinhada ao eixo local 2; a largura
+    (`inercia_y`), ao eixo local 3. Pra pilar vertical isso dá altura
+    em Y e largura em X (leitura de planta baixa), e mantém a altura
+    de Pilar e Viga consistentes entre si.
 
   - Layers organizadas por PAVIMENTO + TIPO (ex.: "PAV1-PILARES"),
     pra poder ligar/desligar cada combinação separadamente em
@@ -410,19 +413,20 @@ class ExportadorDxf:
         self, no_inicial: Ponto, no_final: Ponto, rotacao_graus: float
     ) -> Tuple[Vetor3D, Vetor3D, Vetor3D]:
         """
-        Base ortonormal local da barra (eixo1, eixo2, eixo3), seguindo a
-        convenção default de eixos locais do SAP2000: eixo1 ao longo da
-        barra (no_inicial -> no_final); eixo2 default = projeção de +Z
-        global perpendicular ao eixo1 (mantém a seção "em pé"), ou +X
-        global se a barra for exatamente vertical; eixo3 = eixo1 × eixo2.
-        `rotacao_graus` gira eixo2/eixo3 em torno do eixo1.
+        Base ortonormal local da barra (eixo1, eixo2, eixo3), na convenção
+        PRÓPRIA do projeto (derivada da do SAP2000, ver docstring do
+        módulo): eixo1 ao longo da barra (no_inicial -> no_final); eixo2
+        default = projeção de +Z global perpendicular ao eixo1 (mantém a
+        seção "em pé"), ou +Y global se a barra for exatamente vertical
+        (o SAP2000 usa +X aqui); eixo3 = eixo1 × eixo2. `rotacao_graus`
+        gira eixo2/eixo3 em torno do eixo1.
         """
         eixo1 = self._normalizar(self._subtrair((no_final.x, no_final.y, no_final.z), (no_inicial.x, no_inicial.y, no_inicial.z)))
 
         global_z = (0.0, 0.0, 1.0)
         paralelo_a_z = abs(self._produto_escalar(eixo1, global_z)) > 1 - 1e-9
         if paralelo_a_z:
-            eixo2_default = (1.0, 0.0, 0.0)  # convenção SAP2000 p/ barra vertical: +X global
+            eixo2_default = (0.0, 1.0, 0.0)  # convenção própria p/ barra vertical: +Y global (SAP2000 usaria +X)
         else:
             projecao = self._subtrair(global_z, self._escala(eixo1, self._produto_escalar(eixo1, global_z)))
             eixo2_default = self._normalizar(projecao)
