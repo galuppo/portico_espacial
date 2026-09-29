@@ -22,19 +22,13 @@ ajustáveis se não corresponderem ao que você espera ver no CAD):
     desenham apoios/rótulos do mesmo jeito (sempre como linhas/texto,
     mesmo no modo sólido).
 
-  - Orientação da seção no espaço: convenção PRÓPRIA do projeto
-    (derivada da do SAP2000, com um ajuste só no caso vertical; mesma
-    em ExportadorIfc._eixos_locais) -- eixo local 1 ao longo da barra
-    (no_inicial -> no_final); eixo local 2 default = projeção de +Z
-    global perpendicular ao eixo 1 (mantém a seção "em pé"), ou +Y
-    global se a barra for exatamente vertical (o SAP2000 usa +X aqui --
-    quem exportar pro SAP2000 precisa compensar); eixo local 3 =
-    eixo1 × eixo2; `rotacao` (graus) gira 2/3 em torno de 1. Regra
-    única pra qualquer orientação: a altura da seção (dimensão do eixo
-    forte, `inercia_x`) fica alinhada ao eixo local 2; a largura
-    (`inercia_y`), ao eixo local 3. Pra pilar vertical isso dá altura
-    em Y e largura em X (leitura de planta baixa), e mantém a altura
-    de Pilar e Viga consistentes entre si.
+  - Orientação da seção no espaço: convenção PRÓPRIA do projeto,
+    definida num só lugar (`orientacao.py`, compartilhado com
+    ExportadorIfc e interseccao.py) -- ver a docstring de lá. Em
+    resumo: eixo 1 ao longo da barra; altura da seção -> eixo 2 ("pra
+    cima"), largura -> eixo 3; pilar vertical fica com altura em Y e
+    largura em X. O SAP2000 difere só pra barra vertical (usa eixo 2 =
+    X) -- ao exportar pra ele, compensar.
 
   - Layers organizadas por PAVIMENTO + TIPO (ex.: "PAV1-PILARES"),
     pra poder ligar/desligar cada combinação separadamente em
@@ -87,19 +81,17 @@ ajustáveis se não corresponderem ao que você espera ver no CAD):
 from __future__ import annotations
 
 import math
-from typing import List, Tuple
 
 import ezdxf
 
 from ..elementos import ApoioRestricao, Laje, Pavimento, Vao, Viga
 from ..estrutura import ModeloPortico
 from ..geometria import Ponto
+from ..orientacao import prisma_global
 from ..vinculos import Restricao, TipoRestricao
 
 # Caracteres não permitidos em nome de layer DXF -- sanitizados na hora de montar o nome.
 _CARACTERES_INVALIDOS_LAYER = '<>/\\":;?*|=`'
-
-Vetor3D = Tuple[float, float, float]
 
 
 class ExportadorDxf:
@@ -190,7 +182,7 @@ class ExportadorDxf:
                 algo_desenhado = True
 
         if not algo_desenhado:
-            return
+            raise ValueError(f"Nenhum elemento do modelo foi classificado no pavimento {pavimento.nome!r}.")
 
         self._doc.saveas(caminho)
 
@@ -236,19 +228,9 @@ class ExportadorDxf:
         deslocamento -- comportamento anterior, inalterado.
         """
         no_i, no_f = barra.no_inicial, barra.no_final
-        _, eixo2, eixo3 = self._eixos_locais(no_i, no_f, barra.rotacao)
-        vertices_secao = self._vertices_anti_horario(barra.secao.vertices)
-        if referencia_topo:
-            altura_maxima = max(vy for _vx, vy in vertices_secao)
-            vertices_secao = [(vx, vy - altura_maxima) for vx, vy in vertices_secao]
-        n = len(vertices_secao)
-
-        def ponto_3d(no: Ponto, vx: float, vy: float) -> Tuple[float, float, float]:
-            dx, dy, dz = self._soma(self._escala(eixo3, vx), self._escala(eixo2, vy))
-            return (no.x + dx, no.y + dy, no.z + dz)
-
-        tampa_i = [ponto_3d(no_i, vx, vy) for vx, vy in vertices_secao]
-        tampa_f = [ponto_3d(no_f, vx, vy) for vx, vy in vertices_secao]
+        # duas tampas do prisma em coordenadas globais (geometria em orientacao.py)
+        tampa_i, tampa_f = prisma_global(no_i, no_f, barra.rotacao, barra.secao, referencia_topo)
+        n = len(tampa_i)
 
         layer = self._layer(pavimento, sufixo_layer, cor)
         malha = msp.add_mesh(dxfattribs={"layer": layer})
@@ -404,74 +386,3 @@ class ExportadorDxf:
     @staticmethod
     def _ponto_medio(p1: Ponto, p2: Ponto) -> Ponto:
         return Ponto((p1.x + p2.x) / 2, (p1.y + p2.y) / 2, (p1.z + p2.z) / 2)
-
-    # ------------------------------------------------------------------
-    # Geometria do sólido extrudado (eixos locais + vetores 3D)
-    # ------------------------------------------------------------------
-
-    def _eixos_locais(
-        self, no_inicial: Ponto, no_final: Ponto, rotacao_graus: float
-    ) -> Tuple[Vetor3D, Vetor3D, Vetor3D]:
-        """
-        Base ortonormal local da barra (eixo1, eixo2, eixo3), na convenção
-        PRÓPRIA do projeto (derivada da do SAP2000, ver docstring do
-        módulo): eixo1 ao longo da barra (no_inicial -> no_final); eixo2
-        default = projeção de +Z global perpendicular ao eixo1 (mantém a
-        seção "em pé"), ou +Y global se a barra for exatamente vertical
-        (o SAP2000 usa +X aqui); eixo3 = eixo1 × eixo2. `rotacao_graus`
-        gira eixo2/eixo3 em torno do eixo1.
-        """
-        eixo1 = self._normalizar(self._subtrair((no_final.x, no_final.y, no_final.z), (no_inicial.x, no_inicial.y, no_inicial.z)))
-
-        global_z = (0.0, 0.0, 1.0)
-        paralelo_a_z = abs(self._produto_escalar(eixo1, global_z)) > 1 - 1e-9
-        if paralelo_a_z:
-            eixo2_default = (0.0, 1.0, 0.0)  # convenção própria p/ barra vertical: +Y global (SAP2000 usaria +X)
-        else:
-            projecao = self._subtrair(global_z, self._escala(eixo1, self._produto_escalar(eixo1, global_z)))
-            eixo2_default = self._normalizar(projecao)
-
-        eixo3_default = self._normalizar(self._produto_vetorial(eixo1, eixo2_default))
-
-        angulo = math.radians(rotacao_graus)
-        cos_a, sin_a = math.cos(angulo), math.sin(angulo)
-        eixo2 = self._soma(self._escala(eixo2_default, cos_a), self._escala(eixo3_default, sin_a))
-        eixo3 = self._soma(self._escala(eixo3_default, cos_a), self._escala(eixo2_default, -sin_a))
-
-        return eixo1, eixo2, eixo3
-
-    @staticmethod
-    def _vertices_anti_horario(vertices: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-        """Garante sentido anti-horário (área com sinal positiva) -- normais das faces da MESH saem pra fora."""
-        area_dupla = sum(
-            vertices[i][0] * vertices[(i + 1) % len(vertices)][1] - vertices[(i + 1) % len(vertices)][0] * vertices[i][1]
-            for i in range(len(vertices))
-        )
-        return vertices if area_dupla > 0 else list(reversed(vertices))
-
-    @staticmethod
-    def _subtrair(a: Vetor3D, b: Vetor3D) -> Vetor3D:
-        return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
-
-    @staticmethod
-    def _soma(a: Vetor3D, b: Vetor3D) -> Vetor3D:
-        return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
-
-    @staticmethod
-    def _escala(v: Vetor3D, k: float) -> Vetor3D:
-        return (v[0] * k, v[1] * k, v[2] * k)
-
-    @staticmethod
-    def _produto_escalar(a: Vetor3D, b: Vetor3D) -> float:
-        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-
-    @staticmethod
-    def _produto_vetorial(a: Vetor3D, b: Vetor3D) -> Vetor3D:
-        return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
-
-    @staticmethod
-    def _normalizar(v: Vetor3D) -> Vetor3D:
-        norma = math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2)
-        if norma < 1e-12:
-            raise ValueError("Não é possível normalizar um vetor nulo (barra com no_inicial == no_final?).")
-        return (v[0] / norma, v[1] / norma, v[2] / norma)

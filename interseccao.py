@@ -5,26 +5,36 @@ Usado na montagem do ModeloPortico para descobrir onde uma Viga cruza
 um Pilar (ou outra Viga), considerando a seção real do elemento
 hospedeiro -- não apenas a reta idealizada do eixo.
 
+Funciona com qualquer SecaoTransversal (SecaoRetangular, SecaoPoligonal...):
+a geometria da seção vem de `orientacao.py`, a mesma fonte usada pelos
+exportadores -- assim o que a detecção considera "dentro da seção" é
+exatamente o que é desenhado.
+
 ESCOPO ATUAL:
   - Viga x Pilar: só Pilar vertical está implementado. Pilar inclinado
     (_intersecao_pilar_generico) levanta NotImplementedError -- fica
-    para depois de validar o caminho simplificado em uso real.
+    para depois de validar o caminho simplificado em uso real. Contato
+    aproximado pelo alcance de cada seção (mesmo critério de Viga x
+    Viga, não o polígono exato): qualquer toque entre a seção do Pilar
+    e a seção da Viga, não só o eixo da Viga caindo dentro do Pilar.
   - Viga x Viga: assume Viga sem rotação própria (altura sempre
     vertical, ao longo de Z global) -- viga rotacionada fica para
-    depois.
+    depois. Contato aproximado pelo alcance da seção de cada viga:
+    alcance lateral (em planta) e faixa vertical.
 
 CONVENÇÃO DE REFERÊNCIA VERTICAL: ponto_inicial/ponto_final de uma
 Viga representam o TOPO da seção, não o centroide -- decisão de
 projeto, para simplificar modelagem/detalhamento (e viabilizar
 desníveis de viga em relação ao pavimento como um simples ajuste de
 z). A faixa de altura de uma viga é, portanto, [z - altura, z], não
-[z - altura/2, z + altura/2]. O ajuste para eixo centroidal (o que
+[z - altura/2, z + altura/2] (pra seção não retangular, "altura" é a
+extensão vertical do perfil). O ajuste para eixo centroidal (o que
 ferramentas de análise como SAP2000/OpenSees esperam) é feito só na
 exportação (exportadores/), não aqui.
 
 A existência de uma conexão Viga x Viga é determinada inteiramente
-pelo teste geométrico aqui (seção real -- largura e altura de ambas as
-vigas) -- não depende de nenhuma declaração prévia. Quando as faixas
+pelo teste geométrico aqui (seção real de ambas as vigas) -- não
+depende de nenhuma declaração prévia. Quando as faixas
 de altura se sobrepõem mas os pontos de referência estão em cotas
 diferentes, a conexão precisa de um Link (ver
 ResultadoIntersecaoVigaViga.precisa_link).
@@ -37,7 +47,7 @@ from dataclasses import dataclass
 
 from .elementos import Pilar, Viga
 from .geometria import Ponto
-from .secoes import SecaoRetangular
+from .orientacao import extensoes_do_perfil
 
 
 @dataclass(frozen=True)
@@ -103,37 +113,42 @@ def _ponto_mais_proximo_em_planta(viga: Viga, x0: float, y0: float) -> Ponto:
     )
 
 
-def _dentro_da_secao_retangular_em_planta(
-    x: float,
-    y: float,
-    x0: float,
-    y0: float,
-    secao: SecaoRetangular,
-    rotacao_graus: float,
-) -> bool:
+def _alcance_radial_planta(secao) -> float:
     """
-    Verifica se o ponto (x, y) cai dentro do retângulo da seção do
-    Pilar centrado em (x0, y0), considerando a rotação do Pilar em
-    torno do próprio eixo (z), em graus.
+    Maior distância do ponto de referência da barra até a borda da seção,
+    EM PLANTA -- usado só pro Pilar (vertical): como as duas dimensões da
+    seção (`largura` e `altura`) ficam no plano horizontal, soma os dois
+    lados de cada uma pra um raio conservador (cobre a seção inteira,
+    independente de rotação).
+    """
+    largura_min, largura_max, altura_min, altura_max = extensoes_do_perfil(secao, referencia_topo=False)
+    return max(abs(largura_min), abs(largura_max), abs(altura_min), abs(altura_max))
 
-    Transforma (x, y) para o sistema local do Pilar (rotação inversa)
-    e compara com meia-largura / meia-altura da seção.
+
+def _alcance_lateral_viga(secao) -> float:
     """
-    rad = math.radians(rotacao_graus)
-    dx, dy = x - x0, y - y0
-    x_local = dx * math.cos(rad) + dy * math.sin(rad)
-    y_local = -dx * math.sin(rad) + dy * math.cos(rad)
-    return abs(x_local) <= secao.largura / 2 and abs(y_local) <= secao.altura / 2
+    Alcance em planta de uma Viga: só `largura` conta (`altura` é
+    vertical pra uma viga horizontal, não faz parte do plano) -- mesmo
+    critério já usado em `detectar_intersecao_viga_viga`.
+    """
+    largura_min, largura_max, _altura_min, _altura_max = extensoes_do_perfil(secao, referencia_topo=True)
+    return max(abs(largura_min), abs(largura_max))
 
 
 def _intersecao_pilar_vertical(viga: Viga, pilar: Pilar) -> ResultadoIntersecao | None:
     """
     Caminho simplificado: Pilar vertical.
 
-    A extensão transversal do Pilar é, em qualquer cota da sua altura,
-    o mesmo retângulo (em planta) -- não precisa de nenhuma álgebra de
-    retas reversas nem de plano perpendicular ao eixo; a "seção do
-    Pilar" já É um plano horizontal.
+    A extensão transversal do Pilar é, em qualquer cota da sua altura, a
+    mesma em planta -- não precisa de nenhuma álgebra de retas reversas
+    nem de plano perpendicular ao eixo; a "seção do Pilar" já É um plano
+    horizontal.
+
+    Contato aproximado pelo alcance de cada seção (mesmo padrão de
+    Viga x Viga, não o polígono exato): a distância entre o centroide do
+    Pilar e o ponto do eixo da Viga mais próximo dele precisa ser menor
+    que a soma dos alcances -- ou seja, qualquer toque entre as duas
+    seções, não só o eixo da Viga caindo dentro do Pilar.
     """
     x0, y0 = pilar.ponto_base.x, pilar.ponto_base.y
     ponto_viga = _ponto_mais_proximo_em_planta(viga, x0, y0)
@@ -142,16 +157,13 @@ def _intersecao_pilar_vertical(viga: Viga, pilar: Pilar) -> ResultadoIntersecao 
     if not (z_min <= ponto_viga.z <= z_max):
         return None  # ponto de aproximação mínima fora da faixa de altura do pilar
 
-    if not isinstance(pilar.secao, SecaoRetangular):
-        raise NotImplementedError(
-            "Detecção de interseção só implementada para SecaoRetangular por enquanto."
-        )
+    distancia_em_planta = math.hypot(ponto_viga.x - x0, ponto_viga.y - y0)
+    limite = _alcance_radial_planta(pilar.secao) + _alcance_lateral_viga(viga.secao)
+    if distancia_em_planta > limite:
+        return None  # a viga passa perto, mas longe demais -- sem conexão real
 
-    if not _dentro_da_secao_retangular_em_planta(
-        ponto_viga.x, ponto_viga.y, x0, y0, pilar.secao, pilar.rotacao
-    ):
-        return None  # a viga passa perto, mas fora do retângulo do pilar -- sem conexão real
-
+    # ponto de conexão: sobre o eixo da Viga (reta que a define), no ponto
+    # de menor distância até o centroide do Pilar -- já é `ponto_viga`
     ponto_no_pilar = Ponto(x0, y0, ponto_viga.z)
     excentricidade = (ponto_viga.x - x0, ponto_viga.y - y0)
     return ResultadoIntersecao(
@@ -286,7 +298,9 @@ def _pontos_mais_proximos_entre_segmentos_2d(
 def detectar_intersecao_viga_viga(viga1: Viga, viga2: Viga) -> ResultadoIntersecaoVigaViga | None:
     """
     Detecta se e onde duas Vigas se cruzam de verdade, considerando a
-    seção real de ambas (largura em planta + altura, faixa vertical).
+    seção real de ambas: alcance lateral em planta + faixa vertical, os
+    dois tirados da caixa envolvente do perfil de cada viga (funciona com
+    qualquer SecaoTransversal).
 
     Retorna None se as vigas não chegam a se tocar -- seja porque
     passam longe demais em planta, seja porque suas faixas de altura
@@ -295,10 +309,10 @@ def detectar_intersecao_viga_viga(viga1: Viga, viga2: Viga) -> ResultadoIntersec
     ESCOPO ATUAL: assume Viga sem rotação própria (altura sempre
     vertical, ao longo de Z global) -- ver módulo.
     """
-    if not isinstance(viga1.secao, SecaoRetangular) or not isinstance(viga2.secao, SecaoRetangular):
-        raise NotImplementedError(
-            "Detecção de interseção Viga x Viga só implementada para SecaoRetangular por enquanto."
-        )
+    # Caixa envolvente do perfil de cada viga, com o TOPO como referência
+    # (ver docstring do módulo): (largura_min, largura_max, altura_min, altura_max)
+    _, _, altura_min1, altura_max1 = extensoes_do_perfil(viga1.secao, referencia_topo=True)
+    _, _, altura_min2, altura_max2 = extensoes_do_perfil(viga2.secao, referencia_topo=True)
 
     p1 = (viga1.ponto_inicial.x, viga1.ponto_inicial.y)
     p2 = (viga1.ponto_final.x, viga1.ponto_final.y)
@@ -310,13 +324,20 @@ def detectar_intersecao_viga_viga(viga1: Viga, viga2: Viga) -> ResultadoIntersec
     ponto2 = _interpolar_viga(viga2, t)
 
     distancia_em_planta = math.hypot(ponto1.x - ponto2.x, ponto1.y - ponto2.y)
-    limite = viga1.secao.largura / 2 + viga2.secao.largura / 2
+    # Alcance lateral = maior distância do eixo a qualquer lado da seção.
+    # A distância entre os eixos não diz de que lado do eixo está o outro,
+    # então usa o alcance dos dois lados (conservador quando a seção é
+    # assimétrica; igual a largura/2 numa seção simétrica).
+    alcance1 = _alcance_lateral_viga(viga1.secao)
+    alcance2 = _alcance_lateral_viga(viga2.secao)
+    limite = alcance1 + alcance2
     if distancia_em_planta > limite:
         return None  # nem chegam perto o suficiente em planta
 
-    # ponto.z é o TOPO da viga (ver docstring do módulo) -- fundo = topo - altura
-    topo1, fundo1 = ponto1.z, ponto1.z - viga1.secao.altura
-    topo2, fundo2 = ponto2.z, ponto2.z - viga2.secao.altura
+    # ponto.z é o TOPO da viga (ver docstring do módulo): a faixa vertical
+    # é a extensão do perfil (já deslocada pro topo, então altura_max = 0)
+    topo1, fundo1 = ponto1.z + altura_max1, ponto1.z + altura_min1
+    topo2, fundo2 = ponto2.z + altura_max2, ponto2.z + altura_min2
     if topo1 < fundo2 or topo2 < fundo1:
         return None  # faixas de altura não se sobrepõem -- sem contato real
 
