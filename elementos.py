@@ -22,11 +22,12 @@ fica isolada em exportadores/sap2000.py.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Union
 
-from .geometria import Ponto
+from .geometria import TOLERANCIA_GEOMETRICA, Ponto
 from .grelha import Grelha
 from .materiais import Material
 from .secoes import SecaoTransversal
@@ -218,6 +219,31 @@ class Vao(Barra):
 
 
 @dataclass
+class ApoioLaje:
+    """
+    Trecho de uma aresta do polígono de uma Laje que se apoia num Vão de Viga.
+
+    NÃO herda de Apoio: aquele modela o apoio de uma EXTREMIDADE
+    (Vao.apoio_inicial, Pilar.apoio_base...), enquanto este é um apoio ao
+    longo de um TRECHO de aresta -- conceito diferente, com intervalo.
+
+    aresta: índice (0-based) da aresta no polígono da Laje -- a aresta i
+        vai de poligono[i] a poligono[(i + 1) % n].
+    intervalo: (dist_ini, dist_fim), distância 3D a partir do vértice
+        inicial da aresta (mesma convenção de Viga.restricoes). Pode ser
+        parcial: um mesmo lado da laje costuma ser coberto por vários
+        Vãos (a viga é quebrada por pilares), cada um com seu intervalo.
+
+    Preenchido na montagem do ModeloPortico (Laje.apoios) -- resolvido
+    por geometria, não declarado pelo usuário.
+    """
+
+    vao: Vao
+    aresta: int
+    intervalo: tuple[float, float]
+
+
+@dataclass
 class Pilar(ElementoEstrutural):
     """
     Agregador de Lances -- NÃO é uma Barra.
@@ -336,29 +362,24 @@ class Viga(ElementoEstrutural):
 
 
 @dataclass
-class Bordo:
-    """
-    Trecho de contorno de Laje sem viga de apoio (aresta livre).
-
-    Única finalidade: descrever, via polilinha, um trecho de contorno
-    que o laço de Vigas ao redor da Laje não cobre.
-    """
-
-    pontos: list[Ponto]
-
-
-@dataclass
 class Laje(ElementoEstrutural):
     """
     Agregadora de barras de grid -- NÃO é uma Barra.
 
-    O contorno é derivado automaticamente do laço fechado de Vigas ao
-    redor; onde não há viga, o trecho de contorno é coberto por um
-    Bordo explícito. Seção e material são constantes para a laje
-    inteira (sem variação por barra do grid).
+    O contorno é um POLÍGONO GEOMÉTRICO (`poligono`, vértices em
+    sequência, sem repetir o primeiro no fim) que representa o TOPO da
+    laje. Os apoios em Vigas NÃO são declarados: são inferidos na
+    montagem do ModeloPortico (ver Laje.apoios) comparando cada aresta
+    com os Vãos das vigas do mesmo pavimento. O que sobra de aresta sem
+    Vão é borda livre (ver trechos_livres) -- não existe mais uma classe
+    Bordo para declará-la.
+
+    Seção e material são constantes para a laje inteira (sem variação
+    por barra do grid).
 
     Viga cruzando o INTERIOR da laje (não apenas a borda) não é
-    suportado -- deve gerar erro na montagem.
+    suportado -- deveria gerar erro na montagem (validação ainda NÃO
+    implementada, decisão de projeto adiada).
 
     `nome` é numerado por pavimento (ver GeradorId.proximo_nome),
     usando `pavimento` abaixo como referência -- diferente de Viga, a
@@ -371,9 +392,8 @@ class Laje(ElementoEstrutural):
 
     O grid em si é gerado por uma instância interna de `Grelha`
     (módulo `grelha.py`, trazido do projeto do usuário) -- na
-    montagem, o contorno (laço de Viga/Bordo) vira o `poligono` que a
-    Grelha espera, e `direcao_e1`/`espacamento_x`/`espacamento_y` são
-    repassados direto pra `Grelha.gerar_grelha()`. `barras_grid_x`/
+    montagem, `poligono` é repassado à Grelha, junto com
+    `direcao_e1`/`espacamento_x`/`espacamento_y`. `barras_grid_x`/
     `barras_grid_y` são a tradução das barras da Grelha (tuplas de
     pontos crus) para `Barra` do modelo. A instância de Grelha em si
     fica exposta diretamente (`grelha`, público) -- quem precisar de
@@ -388,12 +408,43 @@ class Laje(ElementoEstrutural):
     secao: SecaoTransversal  # espessura da laje
     material: Material
     direcao_e1: tuple[float, float, float]  # direção do eixo local "x" da grelha (ver Grelha.__init__)
-    contorno: list[Union[Viga, Bordo]] = field(default_factory=list)
+    poligono: list[Ponto] = field(default_factory=list)  # contorno (topo da laje), sem repetir o 1º vértice no fim
     espacamento_x: float = 0.0
     espacamento_y: float = 0.0
+    apoios: list[ApoioLaje] = field(default_factory=list)  # preenchido na montagem (inferido por geometria)
     barras_grid_x: list[Barra] = field(default_factory=list)  # preenchido na montagem
     barras_grid_y: list[Barra] = field(default_factory=list)  # preenchido na montagem
     grelha: Grelha | None = None  # instância da Grelha, preenchida na montagem -- acesso direto aos métodos dela
 
     def barras(self) -> list[Barra]:
         return [*self.barras_grid_x, *self.barras_grid_y]
+
+    def comprimento_aresta(self, aresta: int) -> float:
+        """Comprimento 3D da aresta `aresta` (de poligono[aresta] a poligono[(aresta + 1) % n])."""
+        a = self.poligono[aresta]
+        b = self.poligono[(aresta + 1) % len(self.poligono)]
+        return math.dist((a.x, a.y, a.z), (b.x, b.y, b.z))
+
+    def trechos_livres(self) -> list[tuple[int, float, float]]:
+        """
+        Borda livre: trechos de aresta SEM nenhum Vão de apoio, como
+        (aresta, dist_ini, dist_fim) -- mesma convenção de ApoioLaje.
+
+        Derivado (complemento dos intervalos de `apoios` em cada
+        aresta), não armazenado. Só faz sentido depois de montar().
+        """
+        livres: list[tuple[int, float, float]] = []
+        for aresta in range(len(self.poligono)):
+            comprimento = self.comprimento_aresta(aresta)
+            # intervalos apoiados nesta aresta, ordenados pelo início
+            apoiados = sorted(ap.intervalo for ap in self.apoios if ap.aresta == aresta)
+
+            cursor = 0.0  # até onde a aresta já foi "resolvida" (apoiada ou registrada como livre)
+            for dist_ini, dist_fim in apoiados:
+                if dist_ini - cursor > TOLERANCIA_GEOMETRICA:
+                    livres.append((aresta, cursor, dist_ini))  # vão entre dois apoios (ou antes do 1º)
+                cursor = max(cursor, dist_fim)  # max: intervalos de Vãos diferentes podem se sobrepor
+
+            if comprimento - cursor > TOLERANCIA_GEOMETRICA:
+                livres.append((aresta, cursor, comprimento))  # sobra depois do último apoio
+        return livres

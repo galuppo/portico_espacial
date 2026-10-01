@@ -23,3 +23,9 @@ class Ponto:
     x: float
     y: float
     z: float
+
+
+# Tolerância geométrica padrão do modelo (unidades do modelo, metros) -- mesmo valor de
+# Grelha._TOL. Usada para decidir coincidência/colinearidade de pontos e arestas
+# (ex.: apoio de Laje em Vão), no lugar de comparações exatas de ponto flutuante.
+TOLERANCIA_GEOMETRICA = 1e-6

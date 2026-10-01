@@ -22,6 +22,9 @@ ESCOPO ATUAL:
     depois. Contato aproximado pelo alcance da seção de cada viga:
     alcance lateral (em planta) e faixa vertical.
 
+  - Laje x Vão: detectar_apoio_laje_em_vao -- aresta do polígono da Laje sobre o eixo
+    do Vão (planta, com tolerância) e dentro da altura da viga; aceita Vão inclinado.
+
 CONVENÇÃO DE REFERÊNCIA VERTICAL: ponto_inicial/ponto_final de uma
 Viga representam o TOPO da seção, não o centroide -- decisão de
 projeto, para simplificar modelagem/detalhamento (e viabilizar
@@ -45,8 +48,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from .elementos import Pilar, Viga
-from .geometria import Ponto
+from .elementos import Pilar, Vao, Viga
+from .geometria import TOLERANCIA_GEOMETRICA, Ponto
 from .orientacao import extensoes_do_perfil
 
 
@@ -105,7 +108,6 @@ def _ponto_mais_proximo_em_planta(viga: Viga, x0: float, y0: float) -> Ponto:
     else:
         t = ((x0 - p0.x) * dx + (y0 - p0.y) * dy) / comprimento_quadrado
         t = max(0.0, min(1.0, t))  # limita ao segmento real, não à reta infinita
-
     return Ponto(
         x=p0.x + t * dx,
         y=p0.y + t * dy,
@@ -390,3 +392,104 @@ def detectar_intersecoes_viga_viga_por_pavimento(
                     resultados.append((viga1, viga2, resultado))
 
     return resultados
+
+
+# Abaixo disso, a variação de cota relativa (g1) entre aresta e Vão é tratada como nula
+# (aresta e Vão paralelos em elevação) -- evita divisão por ~0 ao resolver a faixa de altura.
+_EPS_DECLIVIDADE = 1e-12
+
+
+def detectar_apoio_laje_em_vao(
+    aresta_inicial: Ponto, aresta_final: Ponto, vao: Vao
+) -> tuple[float, float] | None:
+    """
+    Detecta se uma aresta do polígono de uma Laje se apoia (total ou
+    parcialmente) num Vão de Viga.
+
+    Critério de apoio (decisão de projeto): a aresta precisa estar
+      1. SOBRE O EIXO do Vão, em planta (distância perpendicular dos
+         dois nós do Vão à reta da aresta <= TOLERANCIA_GEOMETRICA); e
+      2. DENTRO DA ALTURA da viga na cota: a cota da laje (topo, é o
+         que o polígono representa) cai na faixa [topo - altura, topo]
+         da viga -- a largura da viga não entra no teste.
+
+    Aceita Vão inclinado e aresta inclinada: tanto a cota da laje
+    quanto o topo da viga variam linearmente ao longo da aresta, então
+    a diferença g(t) = z_laje(t) - z_topo_viga(t) também é linear, e o
+    trecho apoiado é o intervalo em que g(t) está dentro da faixa de
+    altura (resolvido em forma fechada, sem amostragem). Por isso o
+    apoio pode sair PARCIAL mesmo com planta perfeitamente alinhada.
+
+    Retorna (dist_ini, dist_fim): trecho da aresta apoiado no Vão, em
+    distância 3D a partir de aresta_inicial (mesma convenção de
+    Viga.restricoes). None se não há apoio (ou se o contato se reduz a
+    um ponto).
+
+    ESCOPO: mesma premissa de detectar_intersecao_viga_viga -- viga sem
+    rotação própria (altura sempre vertical, ao longo de Z global).
+    """
+    tol = TOLERANCIA_GEOMETRICA
+    p, q = vao.no_inicial, vao.no_final
+
+    # --- aresta em planta: origem A, vetor d = B - A ---
+    ax, ay = aresta_inicial.x, aresta_inicial.y
+    dx, dy = aresta_final.x - ax, aresta_final.y - ay
+    comprimento_planta = math.hypot(dx, dy)
+
+    # aresta ou Vão sem extensão em planta (vertical): não há o que alinhar
+    if comprimento_planta <= tol or math.hypot(q.x - p.x, q.y - p.y) <= tol:
+        return None
+
+    # --- (1) colinearidade em planta ---
+    # produto vetorial com o versor da aresta = distância perpendicular do ponto à reta
+    ux, uy = dx / comprimento_planta, dy / comprimento_planta
+    for no in (p, q):
+        if abs((no.x - ax) * uy - (no.y - ay) * ux) > tol:
+            return None
+
+    # --- (2) sobreposição em planta ---
+    # t = posição normalizada ao longo da aresta (0 em aresta_inicial, 1 em aresta_final)
+    def parametro(no: Ponto) -> float:
+        return ((no.x - ax) * dx + (no.y - ay) * dy) / comprimento_planta**2
+
+    t_p, t_q = parametro(p), parametro(q)
+    t_min = max(0.0, min(t_p, t_q))  # início do trecho comum
+    t_max = min(1.0, max(t_p, t_q))  # fim do trecho comum
+    if t_max <= t_min:
+        return None  # sem sobreposição (no máximo se tocam num ponto)
+
+    # --- (3) faixa de altura: g(t) = g0 + g1 * t ---
+    # topo da viga na cota da aresta: interpola o Vão pelo mesmo t (Vão colinear, então
+    # o parâmetro do Vão é função linear de t)
+    w0 = (0.0 - t_p) / (t_q - t_p)  # parâmetro do Vão sobre t = 0
+    w1 = (1.0 - t_p) / (t_q - t_p)  # parâmetro do Vão sobre t = 1
+    z_viga_t0 = p.z + w0 * (q.z - p.z)
+    z_viga_t1 = p.z + w1 * (q.z - p.z)
+    g0 = aresta_inicial.z - z_viga_t0
+    g1 = (aresta_final.z - z_viga_t1) - g0
+
+    # faixa permitida de g: altura_min (<= 0) .. altura_max (= 0), já com o TOPO como referência
+    _, _, altura_min, altura_max = extensoes_do_perfil(vao.secao, referencia_topo=True)
+    g_min, g_max = altura_min - tol, altura_max + tol
+
+    if abs(g1) < _EPS_DECLIVIDADE:
+        # diferença de cota constante: ou o trecho comum inteiro está na faixa, ou nenhum
+        if not (g_min <= g0 <= g_max):
+            return None
+    else:
+        # resolve g_min <= g0 + g1*t <= g_max para t (a ordem depende do sinal de g1)
+        t_a = (g_min - g0) / g1
+        t_b = (g_max - g0) / g1
+        t_min = max(t_min, min(t_a, t_b))
+        t_max = min(t_max, max(t_a, t_b))
+
+    # --- converte t (planta) para distância 3D ao longo da aresta ---
+    # t é proporcional à distância 3D (aresta reta), então basta escalar pelo comprimento real
+    comprimento_3d = math.dist(
+        (aresta_inicial.x, aresta_inicial.y, aresta_inicial.z),
+        (aresta_final.x, aresta_final.y, aresta_final.z),
+    )
+    if (t_max - t_min) * comprimento_3d <= tol:
+        return None  # contato reduzido a um ponto
+
+    return t_min * comprimento_3d, t_max * comprimento_3d

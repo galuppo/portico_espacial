@@ -19,9 +19,9 @@ from dataclasses import dataclass, field
 from .elementos import (
     Apoio,
     ApoioElemento,
+    ApoioLaje,
     ApoioRestricao,
     Barra,
-    Bordo,
     Laje,
     Lance,
     Link,
@@ -30,12 +30,13 @@ from .elementos import (
     Vao,
     Viga,
 )
-from .geometria import Ponto
+from .geometria import TOLERANCIA_GEOMETRICA, Ponto
 from .grelha import Grelha
 from .identificadores import GeradorId
 from .interseccao import (
     ResultadoIntersecao,
     ResultadoIntersecaoVigaViga,
+    detectar_apoio_laje_em_vao,
     detectar_intersecao_viga_pilar,
     detectar_intersecoes_viga_viga_por_pavimento,
 )
@@ -230,20 +231,35 @@ class ModeloPortico:
         secao: SecaoTransversal,
         material: Material,
         direcao_e1: tuple[float, float, float],
-        contorno: list[Viga | Bordo] | None = None,
+        poligono: list[Ponto],
         espacamento_x: float = 0.0,
         espacamento_y: float = 0.0,
         nome: str | None = None,
     ) -> Laje:
         """
-        Cria e registra uma Laje no modelo (contorno/grid resolvidos
+        Cria e registra uma Laje no modelo (apoios/grid resolvidos
         em montar()).
+
+        `poligono`: vértices do contorno da laje, em sequência, no
+        TOPO da laje (pode vir com o primeiro vértice repetido no fim --
+        é descartado). Os apoios em Vigas não são informados aqui: são
+        inferidos por geometria em montar() (ver _resolver_apoios_laje).
 
         id é sempre gerado internamente. nome é opcional: se não
         informado, é gerado a partir de `pavimento` (numeração
         reinicia por pavimento, prefixo "LJ").
         """
         self._validar_ha_pavimentos()
+
+        pontos = list(poligono)
+        # descarta o vértice de fechamento, se o polígono veio explicitamente fechado
+        if len(pontos) > 1 and math.dist(
+            (pontos[0].x, pontos[0].y, pontos[0].z), (pontos[-1].x, pontos[-1].y, pontos[-1].z)
+        ) <= TOLERANCIA_GEOMETRICA:
+            pontos.pop()
+        if len(pontos) < 3:
+            raise ValueError("O polígono da Laje precisa ter ao menos 3 vértices distintos.")
+
         laje = Laje(
             id=self.gerador_id.proximo_id(),
             nome=nome if nome is not None else self.gerador_id.proximo_nome("LJ", pavimento.nome),
@@ -251,7 +267,7 @@ class ModeloPortico:
             secao=secao,
             material=material,
             direcao_e1=direcao_e1,
-            contorno=contorno if contorno is not None else [],
+            poligono=pontos,
             espacamento_x=espacamento_x,
             espacamento_y=espacamento_y,
         )
@@ -430,29 +446,42 @@ class ModeloPortico:
                     )
                 )
 
-    def _construir_poligono_laje(self, laje: Laje) -> list[tuple[float, float, float]]:
-        """Converte laje.contorno (Viga/Bordo, em ordem) num polígono de vértices únicos, sem repetir cantos compartilhados."""
-        poligono: list[tuple[float, float, float]] = []
-        for elemento in laje.contorno:
-            if isinstance(elemento, Bordo):
-                pontos = [(p.x, p.y, p.z) for p in elemento.pontos]
-            else:  # Viga
-                pontos = [
-                    (elemento.ponto_inicial.x, elemento.ponto_inicial.y, elemento.ponto_inicial.z),
-                    (elemento.ponto_final.x, elemento.ponto_final.y, elemento.ponto_final.z),
-                ]
-            for ponto in pontos:
-                if not poligono or poligono[-1] != ponto:
-                    poligono.append(ponto)
-        if len(poligono) > 1 and poligono[0] == poligono[-1]:
-            poligono.pop()
-        return poligono
+    def _resolver_apoios_laje(self, laje: Laje) -> list[ApoioLaje]:
+        """
+        Infere em quais Vãos cada aresta do polígono da Laje se apoia
+        (ver interseccao.detectar_apoio_laje_em_vao para o critério
+        geométrico). Uma aresta pode ter vários Vãos (a viga é quebrada
+        por pilares) e um Vão pode cobrir só parte da aresta; o trecho
+        de aresta sem nenhum Vão é borda livre (Laje.trechos_livres).
+
+        Só considera Vãos de Vigas que tocam o pavimento da Laje
+        (Viga.pavimentos) -- otimização e também evita associar a laje a
+        uma viga de outro andar. Consequência: viga criada sem
+        `pavimentos` é ignorada (decisão de projeto).
+        """
+        n = len(laje.poligono)
+        vaos_candidatos = [
+            vao for viga in self.vigas_do_pavimento(laje.pavimento) for vao in viga.vaos
+        ]
+
+        apoios: list[ApoioLaje] = []
+        for aresta in range(n):
+            inicio = laje.poligono[aresta]
+            fim = laje.poligono[(aresta + 1) % n]  # a última aresta fecha o polígono
+            for vao in vaos_candidatos:
+                intervalo = detectar_apoio_laje_em_vao(inicio, fim, vao)
+                if intervalo is not None:
+                    apoios.append(ApoioLaje(vao=vao, aresta=aresta, intervalo=intervalo))
+
+        apoios.sort(key=lambda ap: (ap.aresta, ap.intervalo))  # ordem estável: por aresta, depois ao longo dela
+        return apoios
 
     def _montar_lajes(self) -> None:
         """
-        Deriva o grid de cada Laje via Grelha: converte o contorno
-        (Viga/Bordo) num polígono, gera o grid, e traduz as barras
-        cruas da Grelha para Barra do modelo.
+        Para cada Laje: resolve os apoios nos Vãos (_resolver_apoios_laje)
+        e deriva o grid via Grelha, traduzindo as barras cruas da
+        Grelha para Barra do modelo. Depende dos Vãos já montados
+        (_montar_vigas roda antes).
 
         Seção das barras de grid: NÃO é `laje.secao` (essa descreve a
         laje inteira -- "largura" nela não tem sentido físico, só
@@ -477,7 +506,10 @@ class ModeloPortico:
         Laje (deveria gerar erro) ainda não implementada.
         """
         for laje in self.lajes:
-            poligono = self._construir_poligono_laje(laje)
+            laje.apoios = self._resolver_apoios_laje(laje)
+
+            # a Grelha trabalha com tuplas (x, y, z) -- converte os Pontos do polígono
+            poligono = [(p.x, p.y, p.z) for p in laje.poligono]
             grelha = Grelha(poligono, laje.direcao_e1)
             grelha.gerar_grelha(laje.espacamento_x, laje.espacamento_y)
             laje.grelha = grelha
@@ -523,7 +555,8 @@ class ModeloPortico:
           3. Deriva os Vãos de cada Viga (_montar_vigas) -- cria Link
              nas conexões Viga x Viga com cotas de referência
              diferentes.
-          4. Deriva o contorno e o grid de cada Laje (_montar_lajes).
+          4. Resolve os apoios de cada Laje nos Vãos e deriva o seu grid
+             (_montar_lajes).
 
         Nenhuma deduplicação de nós separada: os mesmos objetos Ponto
         calculados pela detecção de interseção são reaproveitados dos

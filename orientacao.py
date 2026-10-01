@@ -62,8 +62,8 @@ def eixos_locais(
     """
     dx, dy, dz = p_fim.x - p_ini.x, p_fim.y - p_ini.y, p_fim.z - p_ini.z
     comprimento = math.sqrt(dx * dx + dy * dy + dz * dz)
-    if comprimento < 1e-9:
-        raise ValueError("Barra de comprimento nulo -- não dá pra orientar geometricamente.")
+    # if comprimento < 1e-9:
+    #     raise ValueError("Barra de comprimento nulo -- não dá pra orientar geometricamente.")
     e1 = (dx / comprimento, dy / comprimento, dz / comprimento)
 
     # Vetor de referência de eixo2: Z global, exceto na barra vertical, onde
